@@ -1,0 +1,71 @@
+Only in /mnt/user-data/outputs/SimpleMtkWlan-MT7920: MT7920-changes.diff
+diff -ru -x .git repo/SimpleMtkWlan/Info.plist /mnt/user-data/outputs/SimpleMtkWlan-MT7920/SimpleMtkWlan/Info.plist
+--- repo/SimpleMtkWlan/Info.plist	2026-10-29 15:50:45.477836910 +0300
++++ /mnt/user-data/outputs/SimpleMtkWlan-MT7920/SimpleMtkWlan/Info.plist	2026-10-29 15:54:36.803907707 +0300
+@@ -36,7 +36,7 @@
+ 			<key>IOMatchCategory</key>
+ 			<string>IODefaultMatchCategory</string>
+ 			<key>IOPCIPrimaryMatch</key>
+-			<string>0x796114c3 0x060814c3 0x792214c3 0x061614c3</string>
++			<string>0x796114c3 0x060814c3 0x792014c3 0x792214c3 0x061614c3</string>
+ 			<key>IOProbeScore</key>
+ 			<integer>2000</integer>
+ 			<key>IOProviderClass</key>
+diff -ru -x .git repo/SimpleMtkWlan/hal_mwx/MtkMwx.cpp /mnt/user-data/outputs/SimpleMtkWlan-MT7920/SimpleMtkWlan/hal_mwx/MtkMwx.cpp
+--- repo/SimpleMtkWlan/hal_mwx/MtkMwx.cpp	2026-10-29 15:50:45.477902140 +0300
++++ /mnt/user-data/outputs/SimpleMtkWlan-MT7920/SimpleMtkWlan/hal_mwx/MtkMwx.cpp	2026-10-29 15:54:36.825570175 +0300
+@@ -68,6 +68,7 @@
+ #define PCI_PRODUCT_MEDIATEK_MT7921K   0x0608
+ #define PCI_PRODUCT_MEDIATEK_MT7922    0x7922
+ #define PCI_PRODUCT_MEDIATEK_RZ616     0x0616	/* MT7922 variant; Linux mt7921e loads MT7922 firmware */
++#define PCI_PRODUCT_MEDIATEK_MT7920    0x7920	/* connac2 like MT7921; Linux mt7921e loads MT7961_1a firmware */
+ 
+ #define MWX_LOG(x...) printf("SimpleMtkWlan-mwx: " x)
+ #define MWX_DEV_LOG(sc, fmt, args...) \
+@@ -272,6 +273,7 @@
+ 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7921K },
+ 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7922 },
+ 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_RZ616 },
++	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7920 },
+ };
+ 
+ /* Keep the OpenBSD DPRINTF path available, but do not enable it by default.
+@@ -282,6 +284,8 @@
+ #define	MT7921_FIRMWARE_WM	"mwx-mt7961_ram_code_1"
+ #define	MT7922_ROM_PATCH	"mwx-mt7922_patch_mcu_1_1_hdr"
+ #define	MT7922_FIRMWARE_WM	"mwx-mt7922_ram_code_1"
++#define	MT7920_ROM_PATCH	"mwx-mt7961_patch_mcu_1a_2_hdr"
++#define	MT7920_FIRMWARE_WM	"mwx-mt7961_ram_code_1a"
+ 
+ #if NBPFILTER > 0
+ struct mwx_rx_radiotap_header {
+@@ -389,6 +393,7 @@
+ enum mwx_hw_type {
+ 	MWX_HW_MT7921,
+ 	MWX_HW_MT7922,
++	MWX_HW_MT7920,
+ };
+ 
+ struct mwx_setkey_task_arg {
+@@ -2196,7 +2201,9 @@
+ 	sc->sc_dmat = pa->pa_dmat;
+ 	sc->sc_intr_mask = MT_INT_RX_DONE_ALL | MT_INT_TX_DONE_ALL |
+ 	    MT_INT_MCU_CMD;
+-	if (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_MEDIATEK_MT7922 ||
++	if (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_MEDIATEK_MT7920)
++		sc->sc_hwtype = MWX_HW_MT7920;
++	else if (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_MEDIATEK_MT7922 ||
+ 	    PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_MEDIATEK_RZ616)
+ 		sc->sc_hwtype = MWX_HW_MT7922;
+ 	else
+@@ -4295,6 +4302,10 @@
+ 		rompatch = MT7922_ROM_PATCH;
+ 		fw = MT7922_FIRMWARE_WM;
+ 		break;
++	case MWX_HW_MT7920:
++		rompatch = MT7920_ROM_PATCH;
++		fw = MT7920_FIRMWARE_WM;
++		break;
+ 	}
+ 	MWX_DEV_LOG(sc, "firmware selected patch=%s wm=%s\n", rompatch, fw);
+ 

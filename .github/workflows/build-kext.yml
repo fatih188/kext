@@ -1,0 +1,45 @@
+# Builds SimpleMtkWlan.kext on a GitHub-hosted macOS runner (no local Mac needed).
+# Untested: first run may show Xcode/SDK errors that need fixing.
+name: build-simplemtkwlan
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+
+      - name: Build SimpleMtkWlan (kext, unsigned)
+        run: |
+          xcodebuild -project SimpleMtkWlan.xcodeproj \
+            -scheme SimpleMtkWlan \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Locate built kext
+        id: find
+        run: |
+          KEXT=$(find ~/Library/Developer/Xcode/DerivedData /tmp -name "SimpleMtkWlan.kext" -type d 2>/dev/null | head -n 1)
+          if [ -z "$KEXT" ]; then
+            echo "SimpleMtkWlan.kext not found" >&2
+            exit 1
+          fi
+          mkdir -p artifact
+          cp -R "$KEXT" artifact/
+          echo "Found: $KEXT"
+
+      - name: Upload kext artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleMtkWlan-kext
+          path: artifact/SimpleMtkWlan.kext
