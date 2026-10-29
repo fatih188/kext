@@ -48,3 +48,40 @@ jobs:
         with:
           name: SimpleMtkWlan-kext
           path: artifact/SimpleMtkWlan.kext
+
+  build-monterey:
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Fetch kernel headers (MacKernelSDK)
+        run: git clone --depth 1 https://github.com/acidanthera/MacKernelSDK MacKernelSDK
+
+      - name: Build SimpleMtkWlan for macOS 12 (Monterey)
+        run: |
+          xcodebuild -project SimpleMtkWlan.xcodeproj \
+            -scheme SimpleMtkWlan \
+            -configuration Release \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=12.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Locate built kext
+        run: |
+          KEXT=$(find ~/Library/Developer/Xcode/DerivedData /tmp -name "SimpleMtkWlan.kext" -type d 2>/dev/null | head -n 1)
+          if [ -z "$KEXT" ]; then
+            echo "SimpleMtkWlan.kext not found" >&2
+            exit 1
+          fi
+          mkdir -p artifact
+          cp -R "$KEXT" artifact/
+          echo "Found: $KEXT"
+
+      - name: Upload kext artifact (Monterey)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleMtkWlan-kext-monterey
+          path: artifact/SimpleMtkWlan.kext
