@@ -105,3 +105,40 @@ jobs:
         with:
           name: mtkctl
           path: artifact/mtkctl
+
+  build-airport-tahoe:
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Fetch kernel headers (MacKernelSDK)
+        run: git clone --depth 1 https://github.com/acidanthera/MacKernelSDK MacKernelSDK
+
+      - name: Build AirportMtkWlan for macOS 26 (Tahoe)
+        run: |
+          xcodebuild -project SimpleMtkWlan.xcodeproj \
+            -target AirportMtkWlan \
+            -configuration Debug \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AMTK_IO80211_TARGET=__MAC_26_0 \
+            build
+
+      - name: Locate built kext
+        run: |
+          KEXT=$(find . ~/Library/Developer/Xcode/DerivedData -name "AirportMtkWlan.kext" -type d 2>/dev/null | head -n 1)
+          if [ -z "$KEXT" ]; then
+            echo "AirportMtkWlan.kext not found" >&2
+            exit 1
+          fi
+          mkdir -p artifact
+          cp -R "$KEXT" artifact/
+          echo "Found: $KEXT"
+
+      - name: Upload kext artifact (Tahoe, native Wi-Fi)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirportMtkWlan-Tahoe
+          path: artifact/AirportMtkWlan.kext
