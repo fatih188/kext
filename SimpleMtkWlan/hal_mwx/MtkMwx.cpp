@@ -48,6 +48,7 @@
 #include <ClientKit/Common.h>
 #include <IOKit/IOLocks.h>
 #include <pexpert/pexpert.h>
+#include <kern/clock.h>
 
 /*
  * TX rings are touched by the interrupt (workloop thread), the firmware
@@ -332,6 +333,7 @@ struct mwx_txwi {
 	u_int				mt_idx;
 	int				mt_busy;
 	int				mt_eapol;	/* log TX status */
+	uint64_t			mt_ts_ns;	/* when the token was taken */
 };
 
 struct mwx_txwi_desc {
@@ -713,6 +715,7 @@ int	mwx_txwi_alloc(struct mwx_softc *, int);
 void	mwx_txwi_free(struct mwx_softc *);
 struct mwx_txwi	*mwx_txwi_get(struct mwx_softc *);
 void	mwx_txwi_put(struct mwx_softc *, struct mwx_txwi *);
+void	mwx_txwi_reclaim(struct mwx_softc *);
 int	mwx_txwi_enqueue(struct mwx_softc *, struct mwx_txwi *, struct mbuf *);
 int	mwx_queue_alloc(struct mwx_softc *, struct mwx_queue *, int, uint32_t);
 void	mwx_queue_free(struct mwx_softc *, struct mwx_queue *);
@@ -2642,6 +2645,16 @@ mwx_txwi_free(struct mwx_softc *sc)
 	memset(q, 0, sizeof(*q));
 }
 
+static uint64_t
+mwx_now_ns(void)
+{
+	uint64_t abs, ns;
+
+	clock_get_uptime(&abs);
+	absolutetime_to_nanoseconds(abs, &ns);
+	return ns;
+}
+
 struct mwx_txwi *
 mwx_txwi_get(struct mwx_softc *sc)
 {
@@ -2652,6 +2665,7 @@ mwx_txwi_get(struct mwx_softc *sc)
 		return NULL;
 	LIST_REMOVE(mt, mt_entry);
 	mt->mt_busy = 1;
+	mt->mt_ts_ns = mwx_now_ns();
 	if (++sc->sc_txwi.mt_inuse > sc->sc_txwi.mt_peak)
 		sc->sc_txwi.mt_peak = sc->sc_txwi.mt_inuse;
 	return mt;
@@ -3374,6 +3388,16 @@ mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 				first_unknown_type = type;
 				first_unknown_flag = flag;
 				first_unknown_rxd = rxd;
+			}
+			if (sc->sc_rx_pkt_unknown + unknown_count < 12 &&
+			    mbuf_len(m) >= 8 * sizeof(uint32_t)) {
+				MWX_DEV_LOG(sc, "rx unknown dump len=%zu/%zu "
+				    "%08x %08x %08x %08x %08x %08x %08x %08x\n",
+				    mbuf_len(m), mbuf_pkthdr_len(m),
+				    le32toh(data[0]), le32toh(data[1]),
+				    le32toh(data[2]), le32toh(data[3]),
+				    le32toh(data[4]), le32toh(data[5]),
+				    le32toh(data[6]), le32toh(data[7]));
 			}
 			unknown_count++;
 			m_freem(m);
@@ -5272,7 +5296,67 @@ mwx_dma_timeo(void *arg)
 			return;
 		}
 	}
+	mwx_txwi_reclaim(sc);
 	timeout_add_sec(&sc->sc_dma_to, 2);
+}
+
+/*
+ * MT7920: some TX tokens never get a TX-free notification. They pile up
+ * until the 512-entry pool is empty and TX stops for good (txwi_inuse=509,
+ * oactive=1) while RX keeps working. Give back tokens the firmware has
+ * held for more than 4 s; a real completion takes milliseconds.
+ * -mwxnoreclaim turns this off.
+ */
+static int mwx_reclaim_enabled = -1;
+static uint32_t mwx_reclaim_total, mwx_reclaim_logs;
+
+void
+mwx_txwi_reclaim(struct mwx_softc *sc)
+{
+	struct mwx_txwi_desc *q = &sc->sc_txwi;
+	uint64_t now, oldest = 0;
+	u_int i, n = 0, first = 0;
+	int s;
+
+	if (mwx_reclaim_enabled < 0) {
+		int v = 0;
+		mwx_reclaim_enabled =
+		    PE_parse_boot_argn("-mwxnoreclaim", &v, sizeof(v)) ? 0 : 1;
+	}
+	if (!mwx_reclaim_enabled || q->mt_data == NULL)
+		return;
+
+	s = splnet();
+	now = mwx_now_ns();
+	for (i = MT_PACKET_ID_FIRST; i < q->mt_count; i++) {
+		struct mwx_txwi *mt = &q->mt_data[i];
+		uint64_t age;
+
+		if (!mt->mt_busy || mt->mt_mbuf == NULL)
+			continue;
+		age = now - mt->mt_ts_ns;
+		if (age < 4000000000ULL)
+			continue;
+		if (n == 0)
+			first = i;
+		if (age > oldest)
+			oldest = age;
+		mwx_txwi_put(sc, mt);
+		n++;
+	}
+	splx(s);
+
+	if (n == 0)
+		return;
+	mwx_reclaim_total += n;
+	if (mwx_reclaim_logs < 20) {
+		mwx_reclaim_logs++;
+		MWX_DEV_LOG(sc, "txwi reclaim n=%u first=%u oldest_ms=%llu total=%u "
+		    "inuse=%u notify=%u\n", n, first,
+		    (unsigned long long)(oldest / 1000000ULL), mwx_reclaim_total,
+		    q->mt_inuse, sc->sc_rx_pkt_txrx_notify);
+	}
+	mwx_tx_resume(sc);
 }
 
 /* Reset WFSYS and reload firmware; the only way out of a WFDMA stop. */
