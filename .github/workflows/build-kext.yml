@@ -85,3 +85,23 @@ jobs:
         with:
           name: SimpleMtkWlan-kext-monterey
           path: artifact/SimpleMtkWlan.kext
+
+  build-mtkctl:
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build mtkctl (x86_64, macOS 12+)
+        run: |
+          mkdir -p artifact
+          clang -O2 -Wall -arch x86_64 -mmacosx-version-min=12.0 \
+            -Iinclude/ClientKit -o artifact/mtkctl tools/mtkctl.c \
+            -framework IOKit -framework CoreFoundation
+          file artifact/mtkctl
+
+      - name: Upload mtkctl
+        uses: actions/upload-artifact@v4
+        with:
+          name: mtkctl
+          path: artifact/mtkctl
