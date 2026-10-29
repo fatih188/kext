@@ -815,6 +815,16 @@ IOReturn AirportMtkWlan::setHardwareAddress(const void *addrP, UInt32 addrBytes)
     if (update == AirportWCL::MacUpdate::Busy) {
         return kIOReturnBusy;
     }
+    // MT7920: restarting the firmware for a new (private) MAC leaves the MCU
+    // unresponsive (command timeouts, "init mac enable failed error=35").
+    // Keep the hardware address unless -amtkallowmac is set.
+    if (update == AirportWCL::MacUpdate::Change) {
+        int allow = 0;
+        if (!PE_parse_boot_argn("-amtkallowmac", &allow, sizeof(allow))) {
+            mtk_printf("AirportMtkWlan-wcl: keep hardware mac, ignoring private address\n");
+            return kIOReturnSuccess;
+        }
+    }
     if (!bsdInterface || !bsdInterface->getIfnet())
         return kIOReturnNotReady;
     // WCL calls this directly, bypassing IOEthernetInterface's normal MAC ioctl.
