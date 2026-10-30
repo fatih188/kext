@@ -273,7 +273,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "#!/bin/bash\n\n#  fw_gen.sh\n#  SimpleMtkBtFw\n#\n#  Created by qcwap on 2020/2/26.\n#  Copyright © 2020 钟先耀. All rights reserved.\n\ntarget_file=\"${PROJECT_DIR}\"/SimpleMtkBtFw/FwBinary.cpp\nfw_files=\"${PROJECT_DIR}/SimpleMtkBtFw/fw/\"\n\nrm -rf \"$target_file\"\n\nscript_file=\"${PROJECT_DIR}/scripts/\"\npython3 -c 'import sys;sys.path.append(\"'$script_file'\");import zlib_compress_fw;zlib_compress_fw.process_files(\"'${target_file}'\", \"'$fw_files'\")'\n";
+			shellScript = "# fork: depoda scripts/ klasoru yok; hazir FwBinary.cpp kullanilir\nif [ ! -f \"${PROJECT_DIR}/SimpleMtkBtFw/FwBinary.cpp\" ]; then echo \"error: FwBinary.cpp yok\"; exit 1; fi\necho \"FwBinary.cpp mevcut, firmware uretimi atlandi\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
