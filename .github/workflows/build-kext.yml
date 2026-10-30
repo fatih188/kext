@@ -142,3 +142,39 @@ jobs:
         with:
           name: AirportMtkWlan-Tahoe
           path: artifact/AirportMtkWlan.kext
+
+  build-bt:
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Fetch MacKernelSDK and Lilu 1.7.2 (DEBUG, for headers)
+        run: |
+          cd SimpleMtkBtFw-MT7920
+          git clone --depth 1 https://github.com/acidanthera/MacKernelSDK MacKernelSDK
+          curl -fL -o lilu.zip https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-DEBUG.zip
+          unzip -q -o lilu.zip
+          ls Lilu.kext/Contents/Resources
+
+      - name: Build SimpleMtkBtFw + SimpleMtkBtPatcher
+        run: |
+          cd SimpleMtkBtFw-MT7920
+          for t in SimpleMtkBtFw SimpleMtkBtPatcher; do
+            xcodebuild -project SimpleMtkBtFw.xcodeproj -target $t -configuration Release \
+              ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO SYMROOT=$PWD/build build
+          done
+
+      - name: Collect kexts
+        run: |
+          mkdir -p artifact
+          find SimpleMtkBtFw-MT7920/build -maxdepth 3 -name "*.kext" -type d
+          cp -R "$(find SimpleMtkBtFw-MT7920/build -maxdepth 3 -name SimpleMtkBtFw.kext -type d | head -1)" artifact/
+          cp -R "$(find SimpleMtkBtFw-MT7920/build -maxdepth 3 -name SimpleMtkBtPatcher.kext -type d | head -1)" artifact/
+          ls artifact
+
+      - name: Upload Bluetooth kexts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleMtkBtFw-MT7920
+          path: artifact
