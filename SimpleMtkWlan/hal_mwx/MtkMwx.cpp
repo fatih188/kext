@@ -47,6 +47,7 @@
 #include "if_mwxreg.h"
 #include <ClientKit/Common.h>
 #include <IOKit/IOLocks.h>
+#include <pexpert/pexpert.h>
 
 /*
  * TX rings are touched by the interrupt (workloop thread), the firmware
@@ -1557,6 +1558,15 @@ mwx_newstate_task(void *ptr)
 	splx(s);
 }
 
+/*
+ * MT7920: an off-channel firmware scan while associated can leave the
+ * firmware without TX-free notifications (txwi pool leaks, TX stops) or
+ * without SCAN_DONE. Refuse background scans in RUN unless -mwxbgscan is
+ * set; airportd gets "busy" and keeps using its cached scan results.
+ */
+static int mwx_bgscan_allowed = -1;
+static uint32_t mwx_bgscan_refused;
+
 int
 mwx_bgscan(struct ieee80211com *ic)
 {
@@ -1565,6 +1575,18 @@ mwx_bgscan(struct ieee80211com *ic)
 
 	if (sc->sc_flags & MWX_FLAG_SCANNING)
 		return 0;
+
+	if (mwx_bgscan_allowed < 0) {
+		int v = 0;
+		mwx_bgscan_allowed =
+		    PE_parse_boot_argn("-mwxbgscan", &v, sizeof(v)) ? 1 : 0;
+	}
+	if (!mwx_bgscan_allowed && ic->ic_state == IEEE80211_S_RUN) {
+		if (mwx_bgscan_refused++ < 5)
+			MWX_DEV_LOG(sc, "bgscan refused while associated (%u)\n",
+			    mwx_bgscan_refused);
+		return EBUSY;
+	}
 
 	err = mt7921_mcu_hw_scan(sc, 1);
 	if (err) {
