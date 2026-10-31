@@ -219,6 +219,7 @@ struct bus_dmamap {
 	IOBufferMemoryDescriptor*	dm_bounce_mem;
 	mbuf_t				dm_mbuf;
 	bool				dm_bounce;
+	bool				dm_force_bounce;	/* always DMA through dm_bounce_mem */
 	int				dm_nsegs;
 	bus_size_t			dm_maxsize;
 	bus_size_t			dm_mapsize;

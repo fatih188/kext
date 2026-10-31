@@ -442,7 +442,7 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
 	if (pktlen > UINT32_MAX)
 		return 1;
 	map->dm_mapsize = (bus_size_t)pktlen;
-	bool needs_bounce = false;
+	bool needs_bounce = map->dm_force_bounce;
 	for (int i = 0; i < map->dm_nsegs; i++) {
 		if (segs[i].location > UINT32_MAX || segs[i].length > UINT32_MAX) {
 			needs_bounce = true;
@@ -482,7 +482,7 @@ int bus_dmamap_load(bus_dmamap_t map, mbuf_t mb) {
 		map->dm_segs[0].buf = NULL;
 		map->dm_segs[0].ds_addr = addr;
 		map->dm_segs[0].ds_len = (bus_size_t)pktlen;
-		if (bounce_log_count < 16) {
+		if (!map->dm_force_bounce && bounce_log_count < 16) {
 			IOLog("SimpleMtkWlan-dma: bounce mbuf map len=%zu bounce_size=%u dma=0x%llx\n",
 			    pktlen, map->dm_bounce_size, (unsigned long long)addr);
 			bounce_log_count++;

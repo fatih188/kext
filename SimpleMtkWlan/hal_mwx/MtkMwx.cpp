@@ -556,6 +556,9 @@ struct mwx_softc {
 	uint32_t		sc_rx_pkt_normal;
 	uint32_t		sc_rx_pkt_unknown;
 	uint32_t		sc_rx_fill_fail;
+	uint32_t		sc_rx_ddone_late;	/* DMA_DONE seen after a short wait */
+	uint32_t		sc_rx_ddone_missing;	/* DMA_DONE never seen */
+	uint32_t		sc_rx_diag_logs;
 	uint32_t		sc_rx_delivered;
 	uint32_t		sc_rx_ctl;
 	uint32_t		sc_rx_bar;
@@ -2416,6 +2419,8 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	timeout_set(&sc->sc_scan_to, mwx_scan_timeo, sc);
 	timeout_set(&sc->sc_dma_to, mwx_dma_timeo, sc);
 	sc->sc_knobs = MWX_KNOB_DATA_RA;
+	/* No BAR reaches us, so a hole waits for the gap timer: 300 ms -> 50 ms. */
+	sc->sc_ic.ic_ba_gap_timeout_ms = 50;
 	sc->sc_bgscan_dwell = MWX_BGSCAN_DWELL_AUTO;
 	task_set(&sc->sc_fullreset_task, mwx_fullreset_task, sc, "mwx_fullreset");
 	task_set(&sc->sc_ba_task, mwx_ba_task, sc, "mwx_ba");
@@ -2944,6 +2949,32 @@ mwx_buf_fill(struct mwx_softc *sc, struct mwx_queue_data *md,
 	return 0;
 }
 
+static int mwx_rx_bounce_enabled = -1;
+
+/* -mwxnorxbounce: let RX DMA go straight into the mbuf again. */
+static int
+mwx_rx_fixed_bounce(struct mwx_softc *sc, struct mwx_queue *q)
+{
+	int i;
+
+	if (mwx_rx_bounce_enabled < 0) {
+		int v = 0;
+		mwx_rx_bounce_enabled =
+		    PE_parse_boot_argn("-mwxnorxbounce", &v, sizeof(v)) ? 0 : 1;
+		MWX_DEV_LOG(sc, "rx fixed bounce buffers %s\n",
+		    mwx_rx_bounce_enabled ? "on" : "off (-mwxnorxbounce)");
+	}
+	if (!mwx_rx_bounce_enabled)
+		return 0;
+	for (i = 0; i < q->mq_count; i++) {
+		bus_dmamap_t map = q->mq_data[i].md_map;
+
+		map->dm_force_bounce = true;
+		map->dm_maxsize = MT_RX_BUF_SIZE;
+	}
+	return 0;
+}
+
 int
 mwx_queue_fill(struct mwx_softc *sc, struct mwx_queue *q)
 {
@@ -2992,17 +3023,27 @@ mwx_dma_alloc(struct mwx_softc *sc)
 	    MT_TX_FWDL_RING_BASE)) != 0)
 		return rv;
 
-	/* RX queues */
+	/*
+	 * RX queues. Every RX slot DMAs into its own fixed buffer below 4 GB
+	 * and the data is copied into the mbuf afterwards, so the address in
+	 * a descriptor never changes. With the mbuf address in the descriptor
+	 * some frames (about 7% under load) came back with a valid length but
+	 * stale buffer contents ("rx unknown", old TX payload), i.e. the
+	 * device had written the frame somewhere else.
+	 */
 	if ((rv = mwx_queue_alloc(sc, &sc->sc_rxq, 256,
 	    MT_RX_DATA_RING_BASE)) != 0 ||
+	    (rv = mwx_rx_fixed_bounce(sc, &sc->sc_rxq)) != 0 ||
 	    (rv = mwx_queue_fill(sc, &sc->sc_rxq)) != 0)
 		return rv;
 	if ((rv = mwx_queue_alloc(sc, &sc->sc_rxmcuq, 256,
 	    MT_RX_MCU_RING_BASE)) != 0 ||
+	    (rv = mwx_rx_fixed_bounce(sc, &sc->sc_rxmcuq)) != 0 ||
 	    (rv = mwx_queue_fill(sc, &sc->sc_rxmcuq)) != 0)
 		return rv;
 	if ((rv = mwx_queue_alloc(sc, &sc->sc_rxfwdlq, 16 /* XXX */,
 	    MT_RX_FWDL_RING_BASE)) != 0 ||
+	    (rv = mwx_rx_fixed_bounce(sc, &sc->sc_rxfwdlq)) != 0 ||
 	    (rv = mwx_queue_fill(sc, &sc->sc_rxfwdlq)) != 0)
 		return rv;
 
@@ -3443,6 +3484,8 @@ mwx_dma_rx_process(struct mwx_softc *sc, struct mbuf_list *ml)
 	if_input(&sc->sc_ic.ic_if, &mlout);
 }
 
+static int mwx_ddone_wait = 1;
+
 void
 mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
     struct mbuf_list *ml)
@@ -3469,6 +3512,33 @@ mwx_dma_rx_dequeue(struct mwx_softc *sc, struct mwx_queue *q,
 
 		/* only buf0 is used on RX rings */
 		ctrl = le32toh(desc->ctrl);
+		/*
+		 * DMA_IDX can move before the descriptor is written back
+		 * (mt76 checks DMA_DONE for this reason). Give the device a
+		 * few microseconds; mwx_buf_fill() clears DMA_DONE.
+		 */
+		if ((ctrl & MT_DMA_CTL_DMA_DONE) == 0 && mwx_ddone_wait) {
+			int spin;
+
+			for (spin = 0; spin < 50; spin++) {
+				IODelay(1);
+				ctrl = le32toh(*(volatile uint32_t *)&desc->ctrl);
+				if (ctrl & MT_DMA_CTL_DMA_DONE)
+					break;
+			}
+			if (ctrl & MT_DMA_CTL_DMA_DONE) {
+				sc->sc_rx_ddone_late++;
+			} else {
+				sc->sc_rx_ddone_missing++;
+				/* This chip does not report DMA_DONE: stop waiting. */
+				if (sc->sc_rx_ddone_missing >= 256 &&
+				    sc->sc_rx_ddone_late == 0) {
+					mwx_ddone_wait = 0;
+					MWX_DEV_LOG(sc, "rx ddone wait disabled "
+					    "(never set)\n");
+				}
+			}
+		}
 
 		/* only copy back what the device wrote */
 		bus_dmamap_sync(sc->sc_dmat, md->md_map, 0,
@@ -5275,6 +5345,32 @@ mwx_dump_dma_state(struct mwx_softc *sc, const char *why)
 	}
 }
 
+static uint32_t mwx_reclaim_total;
+
+/* Every ~10 s, if anything changed: RX/TX health counters for mtkctl log. */
+static void
+mwx_rx_diag_log(struct mwx_softc *sc)
+{
+	static uint32_t tick, l_unk, l_late, l_miss, l_recl, l_fill;
+
+	if (++tick % 40 != 0 || sc->sc_rx_diag_logs >= 200)
+		return;
+	if (l_unk == sc->sc_rx_pkt_unknown && l_late == sc->sc_rx_ddone_late &&
+	    l_miss == sc->sc_rx_ddone_missing && l_recl == mwx_reclaim_total &&
+	    l_fill == sc->sc_rx_fill_fail)
+		return;
+	l_unk = sc->sc_rx_pkt_unknown;
+	l_late = sc->sc_rx_ddone_late;
+	l_miss = sc->sc_rx_ddone_missing;
+	l_recl = mwx_reclaim_total;
+	l_fill = sc->sc_rx_fill_fail;
+	sc->sc_rx_diag_logs++;
+	MWX_DEV_LOG(sc, "rx diag normal=%u unknown=%u fill_fail=%u ddone_late=%u "
+	    "ddone_missing=%u reclaim_total=%u txwi_inuse=%u\n",
+	    sc->sc_rx_pkt_normal, l_unk, l_fill, l_late, l_miss, l_recl,
+	    sc->sc_txwi.mt_inuse);
+}
+
 void
 mwx_dma_timeo(void *arg)
 {
@@ -5297,18 +5393,20 @@ mwx_dma_timeo(void *arg)
 		}
 	}
 	mwx_txwi_reclaim(sc);
-	timeout_add_sec(&sc->sc_dma_to, 2);
+	mwx_rx_diag_log(sc);
+	timeout_add_msec(&sc->sc_dma_to, 250);
 }
 
 /*
  * MT7920: some TX tokens never get a TX-free notification. They pile up
  * until the 512-entry pool is empty and TX stops for good (txwi_inuse=509,
  * oactive=1) while RX keeps working. Give back tokens the firmware has
- * held for more than 4 s; a real completion takes milliseconds.
+ * held for more than 750 ms (checked every 250 ms); a real completion
+ * takes milliseconds. 4 s left TX stalled for seconds at a time.
  * -mwxnoreclaim turns this off.
  */
 static int mwx_reclaim_enabled = -1;
-static uint32_t mwx_reclaim_total, mwx_reclaim_logs;
+static uint32_t mwx_reclaim_logs;
 
 void
 mwx_txwi_reclaim(struct mwx_softc *sc)
@@ -5335,7 +5433,7 @@ mwx_txwi_reclaim(struct mwx_softc *sc)
 		if (!mt->mt_busy || mt->mt_mbuf == NULL)
 			continue;
 		age = now - mt->mt_ts_ns;
-		if (age < 4000000000ULL)
+		if (age < 750000000ULL)
 			continue;
 		if (n == 0)
 			first = i;
